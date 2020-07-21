@@ -2,9 +2,11 @@ package main
 
 import (
 	"archive/zip"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -12,6 +14,30 @@ import (
 	"time"
 )
 
+
+type Config struct {
+	AutoEnable       bool   `json:"auto_enable"`
+	AutoTimeInterval int64  `json:"auto_time_interval"`
+	BackupPath       string `json:"backup_path"`
+	KeepNumber       int    `json:"keep_number"`
+	ZipEnable        bool   `json:"zip_enable"`
+}
+
+func loadConfig() (*Config, error) {
+	jsonFile, err := os.Open("config.json")
+	if err != nil {
+		fmt.Println(err)
+	}
+	fmt.Println("读取配置文件 config.json 成功")
+	defer jsonFile.Close()
+
+	byteValue, _ := ioutil.ReadAll(jsonFile)
+
+	var conf Config
+
+	json.Unmarshal(byteValue, &conf)
+	return &conf, err
+}
 
 func isFolder(dirPath string) (bool, error) {
 	info, err := os.Stat(dirPath)
@@ -52,7 +78,7 @@ func createBackupPath(backupPath string) {
 	}
 }
 
-func zipFiles(backupPath string) error {
+func zipToBackup(backupPath string) error {
 
 	gameDataPath := getGameDataPath()
 	if backupPath != "" {
@@ -63,7 +89,7 @@ func zipFiles(backupPath string) error {
 		createBackupPath(backupPath)
 	}
 	nowTime := time.Now()
-	zipfileName := nowTime.Format("20060102-150405") + ".zip"
+	zipfileName := nowTime.Format("20060102150405") + ".zip"
 	target := filepath.Join(backupPath, zipfileName)
 
 	zipfile, err := os.Create(target)
@@ -87,7 +113,7 @@ func zipFiles(backupPath string) error {
 		}
 
 		// 替换文件信息中的文件名
-		fh.Name = filepath.Join(nowTime.Format("20060102-150405"), strings.TrimPrefix(path, gameDataPath))
+		fh.Name = filepath.Join(nowTime.Format("20060102150405"), strings.TrimPrefix(path, gameDataPath))
 		// 这步开始没有加，会发现解压的时候说它不是个目录
 		if fi.IsDir() {
 			fh.Name += "/"
@@ -128,10 +154,95 @@ func zipFiles(backupPath string) error {
 	return err
 }
 
+func copyToBackup(backupPath string) error {
+	gameDataPath := getGameDataPath()
+
+	if backupPath != "" {
+		createBackupPath(backupPath)
+	} else {
+		backupPath = os.Getenv("AppData")
+		backupPath = filepath.Join(backupPath, "DarkSouls3Backup")
+		createBackupPath(backupPath)
+	}
+
+	nowTime := time.Now()
+	copyDirName := nowTime.Format("20060102150405")
+	targetDir := filepath.Join(backupPath, copyDirName)
+	createBackupPath(targetDir)
+
+	err := filepath.Walk(gameDataPath, func(path string, f os.FileInfo, err error) error {
+		if f == nil {
+			return err
+		}
+		if !f.IsDir() {
+			destNewPath := strings.Replace(path, gameDataPath, targetDir, -1)
+			destBaseDir := strings.Replace(destNewPath, filepath.Base(destNewPath), "", -1)
+			destBaseDir, _ =filepath.Abs(destBaseDir)
+			createBackupPath(destBaseDir)
+			fmt.Println("复制文件:" + path + " 到 " + destNewPath)
+			copyFile(path, destNewPath)
+		}
+		return nil
+	})
+	if err != nil {
+		fmt.Printf(err.Error())
+	}
+	return err
+}
+
+//生成目录并拷贝文件
+func copyFile(src, dest string) (w int64, err error) {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	defer srcFile.Close()
+	//分割path目录
+	destSplitPathDirs := strings.Split(dest, "/")
+
+	//检测时候存在目录
+	destSplitPath := ""
+	for index, dir := range destSplitPathDirs {
+		if index < len(destSplitPathDirs)-1 {
+			destSplitPath = destSplitPath + dir + "/"
+			b, _ := pathExists(destSplitPath)
+			if b == false {
+				fmt.Println("创建目录:" + destSplitPath)
+				//创建目录
+				err := os.Mkdir(destSplitPath, os.ModePerm)
+				if err != nil {
+					fmt.Println(err)
+				}
+			}
+		}
+	}
+	dstFile, err := os.Create(dest)
+	if err != nil {
+		fmt.Println(err.Error())
+		return
+	}
+	defer dstFile.Close()
+
+	return io.Copy(dstFile, srcFile)
+}
+
+//检测文件夹路径时候存在
+func pathExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
+}
 
 var (
 	h		bool
 	auto	bool
+	toZip		bool
 
 	backupPath 		string
 	timeInterval	int64
@@ -149,6 +260,7 @@ func usage() {
 func init() {
 	flag.BoolVar(&h, "h", false, "查看帮助")
 	flag.BoolVar(&auto, "auto", false, "开启自动备份")
+	flag.BoolVar(&toZip, "zip", false, "开启备份时压缩成zip格式")
 
 	// 注意 `signal`。默认是 -s string，有了 `signal` 之后，变为 -s signal
 	flag.StringVar(&backupPath, "b", "", "存档备份路径, 默认为黑暗之魂3数据所在路径")
@@ -157,6 +269,23 @@ func init() {
 	flag.Usage = usage
 }
 func main() {
+	conf, err := loadConfig()
+	if err == nil {
+		if conf.AutoEnable {
+			if conf.ZipEnable{
+				zipToBackup(conf.BackupPath)
+			} else {
+				copyToBackup(conf.BackupPath)
+			}
+			time.Sleep(time.Duration(conf.AutoTimeInterval))
+		}
+		if conf.ZipEnable{
+			zipToBackup(conf.BackupPath)
+		} else {
+			copyToBackup(conf.BackupPath)
+		}
+		return
+	}
 	flag.Parse()
 	// 没有任何参数
 	//if flag.NArg() == 0 {
@@ -170,11 +299,19 @@ func main() {
 	if auto {
 		select {
 		default:
-			zipFiles(backupPath)
+			if toZip{
+				zipToBackup(backupPath)
+			} else {
+				copyToBackup(backupPath)
+			}
 			time.Sleep(time.Duration(timeInterval))
 		}
 	}else {
-		zipFiles(backupPath)
+		if toZip{
+			zipToBackup(backupPath)
+		} else {
+			copyToBackup(backupPath)
+		}
 	}
 
 }

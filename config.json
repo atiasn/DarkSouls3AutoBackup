@@ -1,0 +1,7 @@
+{
+  "auto_enable": false,
+  "auto_time_interval": 300,
+  "backup_path": "",
+  "keep_number": 50,
+  "zip_enable": false
+}
